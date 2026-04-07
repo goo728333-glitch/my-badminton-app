@@ -17,36 +17,34 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 建立連線與強制重整功能 ---
+# --- 2. 建立連線 ---
 conn = st.connection("gsheets", type=GSheetsConnection, ttl=0)
 
 if st.sidebar.button("🔄 重新載入雲端資料"):
     st.cache_data.clear()
     st.rerun()
 
-# --- 3. 強化版資料讀取 (含自動重試) ---
-def load_data_with_retry(worksheet_name, expected_cols):
-    # 最多嘗試 3 次
+# --- 3. 強化版資料讀取 ---
+def load_data_stable(worksheet_name, cols):
     for i in range(3):
         try:
             df = conn.read(worksheet=worksheet_name, ttl=0).dropna(how="all")
-            if not df.empty:
-                return df
+            return df if not df.empty else pd.DataFrame(columns=cols)
         except:
-            time.sleep(1) # 失敗就等一秒再試
-    return pd.DataFrame(columns=expected_cols)
+            time.sleep(0.5)
+    return pd.DataFrame(columns=cols)
 
-settings_df = load_data_with_retry("Settings", ["球種", "單筒價格", "單價"])
-records_df = load_data_with_retry("Records", ["日期", "場地費", "球種明細", "用球總成本", "總收入", "淨利"])
+settings_df = load_data_stable("Settings", ["球種", "單筒價格", "單價"])
+records_df = load_data_stable("Records", ["日期", "場地費", "球種明細", "用球總成本", "總收入", "淨利"])
 
 st.title("🏸 羽球管家")
 tab1, tab2, tab3 = st.tabs(["📝 新增開團", "⚙️ 球種設定", "📜 歷史紀錄"])
 
 # --- TAB 1: 新增開團 ---
 with tab1:
-    # 建立 Session State 避免畫面重置時資料消失
+    # 這裡使用更穩定的方式初始化 ball_usage
     if 'ball_usage' not in st.session_state:
-        st.session_state.ball_usage = [{"ball_type": "", "count": 0}]
+        st.session_state.ball_usage = [{"id": time.time(), "ball_type": "", "count": 0}]
 
     with st.container(border=True):
         c_date, c_court = st.columns(2)
@@ -60,9 +58,9 @@ with tab1:
         st.write("---")
         st.write("#### 💰 收入人數")
         i_col1, i_col2, i_col3 = st.columns(3)
-        with i_col1: p140 = st.number_input("$140", min_value=0, step=1)
-        with i_col2: p180 = st.number_input("$180", min_value=0, step=1)
-        with i_col3: p240 = st.number_input("$240", min_value=0, step=1)
+        with i_col1: p140 = st.number_input("$140", min_value=0, step=1, key="p140")
+        with i_col2: p180 = st.number_input("$180", min_value=0, step=1, key="p180")
+        with i_col3: p240 = st.number_input("$240", min_value=0, step=1, key="p240")
         
         auto_income = (p140 * 140) + (p180 * 180) + (p240 * 240)
         st.info(f"💵 目前總收入：**${auto_income}**")
@@ -73,32 +71,41 @@ with tab1:
         ball_options = settings_df["球種"].unique().tolist() if not settings_df.empty else []
         
         if not ball_options:
-            st.error("❌ 雲端抓不到球種！請檢查 Google 試算表或按左側『重新載入』")
+            st.error("❌ 雲端抓不到球種！請檢查 Settings 分頁。")
         else:
             total_ball_cost = 0.0
             ball_details_text = []
             
-            for i, usage in enumerate(st.session_state.ball_usage):
+            # 使用列表複製來進行迴圈，避免刪除元素時出錯
+            for index, usage in enumerate(st.session_state.ball_usage):
+                # 用每個項目的唯一 ID 作為 key，防止增加到多個時發生衝突
+                uid = usage["id"]
                 r1, r2, r3 = st.columns([5, 4, 1.5])
+                
                 with r1:
-                    # 確保預設值在選單內
-                    d_val = usage['ball_type'] if usage['ball_type'] in ball_options else ball_options[0]
-                    usage['ball_type'] = st.selectbox(f"球種", ball_options, index=ball_options.index(d_val), key=f"t_{i}", label_visibility="collapsed")
+                    # 確保選單預設值安全
+                    current_val = usage['ball_type']
+                    idx = ball_options.index(current_val) if current_val in ball_options else 0
+                    usage['ball_type'] = st.selectbox("球種", ball_options, index=idx, key=f"type_{uid}", label_visibility="collapsed")
+                
                 with r2:
-                    usage['count'] = st.number_input(f"顆數", min_value=0, step=1, key=f"n_{i}", label_visibility="collapsed")
+                    usage['count'] = st.number_input("顆數", min_value=0, step=1, value=usage['count'], key=f"num_{uid}", label_visibility="collapsed")
+                
                 with r3:
-                    if st.button("❌", key=f"d_{i}"):
-                        st.session_state.ball_usage.pop(i)
+                    if st.button("❌", key=f"del_{uid}"):
+                        st.session_state.ball_usage.pop(index)
                         st.rerun()
                 
-                # 即時計算成本
-                u_p = float(settings_df.loc[settings_df["球種"] == usage['ball_type'], "單價"].values[0])
+                # 計算單項成本
+                u_p_row = settings_df.loc[settings_df["球種"] == usage['ball_type'], "單價"]
+                u_p = float(u_p_row.values[0]) if not u_p_row.empty else 0.0
                 total_ball_cost += u_p * usage['count']
+                
                 if usage['count'] > 0:
                     ball_details_text.append(f"{usage['ball_type']}x{usage['count']}")
 
             if st.button("➕ 新增球種項目"):
-                st.session_state.ball_usage.append({"ball_type": ball_options[0], "count": 0})
+                st.session_state.ball_usage.append({"id": time.time(), "ball_type": ball_options[0], "count": 0})
                 st.rerun()
 
             st.write("---")
@@ -113,11 +120,12 @@ with tab1:
             if st.button("🚀 儲存紀錄", use_container_width=True):
                 new_row = pd.DataFrame([{"日期": str(date), "場地費": calc_court_fee, "球種明細": ", ".join(ball_details_text), "用球總成本": round(total_ball_cost, 1), "總收入": auto_income, "淨利": round(profit, 1)}])
                 conn.update(worksheet="Records", data=pd.concat([records_df, new_row], ignore_index=True))
-                st.session_state.ball_usage = [{"ball_type": ball_options[0], "count": 0}]
+                # 儲存後完全重置
+                st.session_state.ball_usage = [{"id": time.time(), "ball_type": ball_options[0], "count": 0}]
                 st.success("✅ 儲存成功！")
                 st.rerun()
 
-# --- TAB 2 & 3 保持不變 ---
+# --- TAB 2 & 3 ---
 with tab2:
     st.subheader("🛠 球種管理")
     st.dataframe(settings_df, use_container_width=True)
@@ -138,7 +146,7 @@ with tab3:
         df_show = records_df.copy()
         df_show.index = range(1, len(df_show) + 1)
         st.dataframe(df_show.sort_index(ascending=False), use_container_width=True)
-        idx = st.number_input("輸入列號刪除", min_value=1, max_value=len(records_df), step=1)
+        idx = st.number_input("輸入列號刪除", min_value=1, max_value=len(records_df), step=1, key="del_idx")
         if st.button("🗑️ 刪除紀錄"):
             conn.update(worksheet="Records", data=records_df.drop(records_df.index[idx - 1]))
             st.rerun()
