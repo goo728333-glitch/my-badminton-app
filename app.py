@@ -53,7 +53,10 @@ with tab1:
         with col_date:
             date = st.date_input("開團日期", datetime.now())
         with col_court:
-            court_fee = st.number_input("本場場地費", value=500, step=50)
+            # --- 場地費：改為 250 的倍數選擇 ---
+            court_units = st.number_input("場地單位數 (每單位 $250)", min_value=1, max_value=20, value=2, step=1)
+            calc_court_fee = court_units * 250
+            st.warning(f"🏟️ 場地費總計：**${calc_court_fee}**")
 
         st.write("---")
         # --- 收入計算區 ---
@@ -100,8 +103,8 @@ with tab1:
                 st.rerun()
 
         st.write("---")
-        # 最終計算
-        total_cost = court_fee + total_ball_cost
+        # 最終計算 (場地費使用倍數計算後的結果)
+        total_cost = calc_court_fee + total_ball_cost
         profit = auto_income - total_cost
 
         m1, m2, m3 = st.columns(3)
@@ -115,7 +118,7 @@ with tab1:
             else:
                 new_row = pd.DataFrame([{
                     "日期": str(date),
-                    "場地費": court_fee,
+                    "場地費": calc_court_fee, # 存入計算後的總額
                     "球種明細": ", ".join(ball_details_text),
                     "用球總成本": round(total_ball_cost, 1),
                     "總收入": auto_income,
@@ -127,7 +130,7 @@ with tab1:
                 st.success("紀錄已儲存！")
                 st.rerun()
 
-# --- TAB 2: 球種設定 ---
+# --- TAB 2 & 3 保持不變 ---
 with tab2:
     st.subheader("🛠 球種管理")
     if not settings_df.empty:
@@ -138,7 +141,6 @@ with tab2:
                 new_settings = settings_df[settings_df["球種"] != del_ball]
                 conn.update(worksheet="Settings", data=new_settings)
                 st.rerun()
-    
     st.divider()
     with st.form("add_ball"):
         n_name = st.text_input("新增球種名稱")
@@ -151,14 +153,12 @@ with tab2:
                 conn.update(worksheet="Settings", data=pd.concat([s_df_clean, new_entry], ignore_index=True))
                 st.rerun()
 
-# --- TAB 3: 歷史紀錄 ---
 with tab3:
     st.subheader("📜 歷史開團紀錄")
     if not records_df.empty:
         display_df = records_df.copy()
         display_df.index = range(1, len(display_df) + 1)
         st.dataframe(display_df.sort_index(ascending=False), use_container_width=True)
-        
         del_idx = st.number_input("輸入要刪除的列號", min_value=1, max_value=len(records_df), step=1)
         if st.button("🗑️ 刪除該筆紀錄"):
             new_records = records_df.drop(records_df.index[del_idx - 1])
