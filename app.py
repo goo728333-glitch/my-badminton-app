@@ -2,6 +2,7 @@ import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime
+import time
 
 # --- 1. 頁面配置 ---
 st.set_page_config(page_title="羽球管家 Pro", layout="wide")
@@ -12,49 +13,38 @@ st.markdown("""
     div[data-testid="stMetric"] { 
         background-color: #1f2937; padding: 10px; border-radius: 12px; border: 1px solid #4ade80; 
     }
-    .stNumberInput input { font-size: 16px !important; }
+    .stNumberInput input { font-size: 18px !important; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 建立連線 ---
-try:
-    conn = st.connection("gsheets", type=GSheetsConnection, ttl=0)
-    # 在側邊欄放一個手動重整按鈕，抓不到時點一下
-    if st.sidebar.button("🔄 強制重整資料"):
-        st.cache_data.clear()
-        st.rerun()
-    st.sidebar.success("✅ 已連線")
-except Exception as e:
-    st.sidebar.error(f"❌ 連線失敗: {e}")
-    st.stop()
+# --- 2. 建立連線與強制重整功能 ---
+conn = st.connection("gsheets", type=GSheetsConnection, ttl=0)
 
-# --- 3. 穩定讀取函數 ---
-def load_all_data():
-    # 讀取 Settings
-    try:
-        s_df = conn.read(worksheet="Settings", ttl=0).dropna(how="all")
-    except Exception:
-        s_df = pd.DataFrame(columns=["球種", "單筒價格", "單價"])
-    
-    # 讀取 Records
-    try:
-        r_df = conn.read(worksheet="Records", ttl=0).dropna(how="all")
-    except Exception:
-        r_df = pd.DataFrame(columns=["日期", "場地費", "球種明細", "用球總成本", "總收入", "淨利"])
-    return s_df, r_df
+if st.sidebar.button("🔄 重新載入雲端資料"):
+    st.cache_data.clear()
+    st.rerun()
 
-# 載入資料
-settings_df, records_df = load_all_data()
+# --- 3. 強化版資料讀取 (含自動重試) ---
+def load_data_with_retry(worksheet_name, expected_cols):
+    # 最多嘗試 3 次
+    for i in range(3):
+        try:
+            df = conn.read(worksheet=worksheet_name, ttl=0).dropna(how="all")
+            if not df.empty:
+                return df
+        except:
+            time.sleep(1) # 失敗就等一秒再試
+    return pd.DataFrame(columns=expected_cols)
+
+settings_df = load_data_with_retry("Settings", ["球種", "單筒價格", "單價"])
+records_df = load_data_with_retry("Records", ["日期", "場地費", "球種明細", "用球總成本", "總收入", "淨利"])
 
 st.title("🏸 羽球管家")
 tab1, tab2, tab3 = st.tabs(["📝 新增開團", "⚙️ 球種設定", "📜 歷史紀錄"])
 
 # --- TAB 1: 新增開團 ---
 with tab1:
-    # 檢查是否有球種資料，若無則顯示警告
-    if settings_df.empty:
-        st.warning("⚠️ 目前抓不到球種資料，請確認 Google 試算表是否有內容，或點擊左側『強制重整』")
-    
+    # 建立 Session State 避免畫面重置時資料消失
     if 'ball_usage' not in st.session_state:
         st.session_state.ball_usage = [{"ball_type": "", "count": 0}]
 
@@ -63,47 +53,47 @@ with tab1:
         with c_date:
             date = st.date_input("日期", datetime.now())
         with c_court:
-            court_units = st.number_input("場地單位 ($250/位)", min_value=1, value=2, step=1)
+            court_units = st.number_input("場地單位 ($250/位)", min_value=1, value=2)
             calc_court_fee = court_units * 250
             st.caption(f"🏟️ 場地費：${calc_court_fee}")
 
         st.write("---")
         st.write("#### 💰 收入人數")
         i_col1, i_col2, i_col3 = st.columns(3)
-        with i_col1: p140 = st.number_input("$140", min_value=0, step=1, key="in140")
-        with i_col2: p180 = st.number_input("$180", min_value=0, step=1, key="in180")
-        with i_col3: p240 = st.number_input("$240", min_value=0, step=1, key="in240")
+        with i_col1: p140 = st.number_input("$140", min_value=0, step=1)
+        with i_col2: p180 = st.number_input("$180", min_value=0, step=1)
+        with i_col3: p240 = st.number_input("$240", min_value=0, step=1)
         
         auto_income = (p140 * 140) + (p180 * 180) + (p240 * 240)
-        st.info(f"💵 總收入：**${auto_income}**")
+        st.info(f"💵 目前總收入：**${auto_income}**")
 
         st.write("---")
         st.write("#### 🎾 用球明細")
         
-        total_ball_cost = 0.0
-        ball_details_text = []
         ball_options = settings_df["球種"].unique().tolist() if not settings_df.empty else []
         
         if not ball_options:
-            st.error("❌ 找不到可用球種，請先到『球種設定』確認。")
+            st.error("❌ 雲端抓不到球種！請檢查 Google 試算表或按左側『重新載入』")
         else:
+            total_ball_cost = 0.0
+            ball_details_text = []
+            
             for i, usage in enumerate(st.session_state.ball_usage):
-                row_c1, row_c2, row_c3 = st.columns([5, 4, 1.5])
-                with row_c1:
-                    # 避免選擇到不存在的球種
-                    default_type = usage['ball_type'] if usage['ball_type'] in ball_options else ball_options[0]
-                    usage['ball_type'] = st.selectbox(f"球種", ball_options, index=ball_options.index(default_type), key=f"t_{i}", label_visibility="collapsed")
-                with row_c2:
+                r1, r2, r3 = st.columns([5, 4, 1.5])
+                with r1:
+                    # 確保預設值在選單內
+                    d_val = usage['ball_type'] if usage['ball_type'] in ball_options else ball_options[0]
+                    usage['ball_type'] = st.selectbox(f"球種", ball_options, index=ball_options.index(d_val), key=f"t_{i}", label_visibility="collapsed")
+                with r2:
                     usage['count'] = st.number_input(f"顆數", min_value=0, step=1, key=f"n_{i}", label_visibility="collapsed")
-                with row_c3:
+                with r3:
                     if st.button("❌", key=f"d_{i}"):
                         st.session_state.ball_usage.pop(i)
                         st.rerun()
                 
-                # 計算成本
-                price_data = settings_df.loc[settings_df["球種"] == usage['ball_type'], "單價"]
-                u_price = float(price_data.values[0]) if not price_data.empty else 0.0
-                total_ball_cost += u_price * usage['count']
+                # 即時計算成本
+                u_p = float(settings_df.loc[settings_df["球種"] == usage['ball_type'], "單價"].values[0])
+                total_ball_cost += u_p * usage['count']
                 if usage['count'] > 0:
                     ball_details_text.append(f"{usage['ball_type']}x{usage['count']}")
 
@@ -111,26 +101,23 @@ with tab1:
                 st.session_state.ball_usage.append({"ball_type": ball_options[0], "count": 0})
                 st.rerun()
 
-        st.write("---")
-        total_cost = calc_court_fee + total_ball_cost
-        profit = auto_income - total_cost
+            st.write("---")
+            total_cost = calc_court_fee + total_ball_cost
+            profit = auto_income - total_cost
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("球費", f"${total_ball_cost:.1f}")
-        m2.metric("總支", f"${total_cost:.1f}")
-        m3.metric("利潤", f"${profit:.1f}")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("球費", f"${total_ball_cost:.1f}")
+            m2.metric("總支", f"${total_cost:.1f}")
+            m3.metric("利潤", f"${profit:.1f}")
 
-        if st.button("🚀 儲存紀錄", use_container_width=True):
-            if not ball_details_text and auto_income == 0:
-                st.error("請輸入內容")
-            else:
+            if st.button("🚀 儲存紀錄", use_container_width=True):
                 new_row = pd.DataFrame([{"日期": str(date), "場地費": calc_court_fee, "球種明細": ", ".join(ball_details_text), "用球總成本": round(total_ball_cost, 1), "總收入": auto_income, "淨利": round(profit, 1)}])
                 conn.update(worksheet="Records", data=pd.concat([records_df, new_row], ignore_index=True))
-                st.session_state.ball_usage = [{"ball_type": ball_options[0] if ball_options else "", "count": 0}]
+                st.session_state.ball_usage = [{"ball_type": ball_options[0], "count": 0}]
                 st.success("✅ 儲存成功！")
                 st.rerun()
 
-# --- TAB 2 & 3 ---
+# --- TAB 2 & 3 保持不變 ---
 with tab2:
     st.subheader("🛠 球種管理")
     st.dataframe(settings_df, use_container_width=True)
